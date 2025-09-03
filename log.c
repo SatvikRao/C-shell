@@ -1,4 +1,5 @@
 #include "log.h"
+#include "execute.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -174,46 +175,9 @@ static int execute_from_history(int index) {
 
 /**
  * Execute a command string
- * This is a placeholder - the actual implementation will depend on how commands are executed in the shell
  */
 static int execute_command(const char *command) {
-    // Create a copy of the command for parsing
-    char cmd_copy[MAX_COMMAND_LENGTH];
-    strncpy(cmd_copy, command, MAX_COMMAND_LENGTH - 1);
-    cmd_copy[MAX_COMMAND_LENGTH - 1] = '\0';
-    
-    // Parse the command into arguments
-    char *args[64]; // Maximum number of arguments
-    int argc = 0;
-    char *token = strtok(cmd_copy, " \t\n");
-    
-    while (token != NULL && argc < 63) {
-        args[argc++] = token;
-        token = strtok(NULL, " \t\n");
-    }
-    
-    args[argc] = NULL; // Null-terminate the array
-    
-    // Check if we have any arguments
-    if (argc == 0) {
-        return 0;
-    }
-    
-    // Execute the appropriate built-in command
-    // This is a simplistic approach - in the full implementation,
-    // you would integrate this with your shell's command execution logic
-    if (strcmp(args[0], "hop") == 0) {
-        extern int handle_hop_command(int argc, char *argv[]);
-        return handle_hop_command(argc, args);
-    } else if (strcmp(args[0], "reveal") == 0) {
-        extern int handle_reveal_command(int argc, char *argv[]);
-        return handle_reveal_command(argc, args);
-    }
-    
-    // Add more built-in commands as needed
-    
-    fprintf(stderr, "Unknown command: %s\n", args[0]);
-    return 1;
+    return execute_command_line(command);
 }
 
 int handle_log_command(int argc, char *argv[]) {

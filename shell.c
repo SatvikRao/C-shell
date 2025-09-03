@@ -4,6 +4,7 @@
 #include "hop.h"
 #include "reveal.h"
 #include "log.h"
+#include "execute.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,22 +92,20 @@ void run_shell() {
             add_to_history(input);
         }
         
-        // Parse input into arguments
+        // Parse input into arguments to check for built-in commands
         int argc = parse_args(input_copy, args, 63);
         
-        // Handle built-in commands
+        // Check if it's a built-in command
         if (argc > 0) {
-            if (strcmp(args[0], "hop") == 0) {
-                handle_hop_command(argc, args);
-            } else if (strcmp(args[0], "reveal") == 0) {
-                handle_reveal_command(argc, args);
-            } else if (strcmp(args[0], "log") == 0) {
-                handle_log_command(argc, args);
+            if (strcmp(args[0], "hop") == 0 || 
+                strcmp(args[0], "reveal") == 0 || 
+                strcmp(args[0], "log") == 0) {
+                // Built-in commands are handled inside execute_command_line
             }
-            // Add more built-in commands here as needed
         }
         
-        // Execute external commands (will be implemented later)
+        // Execute the command
+        execute_command_line(input);
     }
 }
 
