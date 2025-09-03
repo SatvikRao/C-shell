@@ -1,7 +1,9 @@
 #include "shell.h"
 #include "prompt.h"
 #include "parser.h"
-#include "commands.h"
+#include "hop.h"
+#include "reveal.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +24,9 @@ int initialize_shell() {
     
     // Initialize command handlers
     initialize_commands();
+    
+    // Initialize command history
+    initialize_history();
     
     return 0;
 }
@@ -45,6 +50,7 @@ static int parse_args(char *input, char *args[], int max_args) {
 
 void run_shell() {
     char input[INPUT_BUFFER_SIZE];
+    char input_copy[INPUT_BUFFER_SIZE];  // To preserve original input for parsing
     char *args[64];  // Maximum number of arguments
     
     while (1) {
@@ -71,19 +77,31 @@ void run_shell() {
             break;
         }
         
+        // Copy input for tokenization (since strtok modifies the string)
+        strcpy(input_copy, input);
+        
         // Parse the command to check syntax
         if (!parse_command(input)) {
             printf("Invalid Syntax!\n");
             continue;
         }
         
+        // Add valid command to history if it's not a log command
+        if (!is_log_command(input)) {
+            add_to_history(input);
+        }
+        
         // Parse input into arguments
-        int argc = parse_args(input, args, 63);
+        int argc = parse_args(input_copy, args, 63);
         
         // Handle built-in commands
         if (argc > 0) {
             if (strcmp(args[0], "hop") == 0) {
                 handle_hop_command(argc, args);
+            } else if (strcmp(args[0], "reveal") == 0) {
+                handle_reveal_command(argc, args);
+            } else if (strcmp(args[0], "log") == 0) {
+                handle_log_command(argc, args);
             }
             // Add more built-in commands here as needed
         }
