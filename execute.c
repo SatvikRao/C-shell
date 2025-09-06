@@ -11,10 +11,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <signal.h>
 
 #define MAX_ARGS 64
 #define MAX_PIPES 16
 #define MAX_COMMAND_LENGTH 4096
+#define MAX_BG_JOBS 32
 
 // Structure to hold a command with its redirections
 typedef struct {
@@ -25,52 +27,157 @@ typedef struct {
     int append_output;     // 1 if output should be appended, 0 otherwise
 } Command;
 
+// Structure to track background jobs
+typedef struct {
+    pid_t pid;                      // Process ID
+    char command[MAX_COMMAND_LENGTH]; // Command string
+    int job_number;                 // Job number
+    int running;                    // 1 if job is still running, 0 otherwise
+} BackgroundJob;
+
+// Global array to track background jobs
+static BackgroundJob bg_jobs[MAX_BG_JOBS];
+static int bg_job_count = 0;
+static int next_job_number = 1;
+
 // Forward declarations
-static int execute_cmd_group(const char *cmd_group);
-static int execute_pipeline(Command *commands, int cmd_count);
+static int execute_cmd_group(const char *cmd_group, int run_in_background);
+static int execute_pipeline(Command *commands, int cmd_count, int run_in_background);
 static int execute_builtin(Command *cmd);
+// Remove the static declaration to match the header file
+// static void check_background_jobs();
+static void add_background_job(pid_t pid, const char *command);
+static char* get_command_name(const char *command);
 
 /**
  * Execute a command line, handling sequential and background operators
- * For now, only the first command group is executed
  */
 int execute_command_line(const char *command) {
+    // Check for completed background jobs first
+    check_background_jobs();
+    
     char cmd_copy[MAX_COMMAND_LENGTH];
     strncpy(cmd_copy, command, MAX_COMMAND_LENGTH - 1);
     cmd_copy[MAX_COMMAND_LENGTH - 1] = '\0';
     
-    // Find the first sequential or background operator
-    char *semicolon = strchr(cmd_copy, ';');
-    char *amp = strchr(cmd_copy, '&');
+    // Split the command by semicolons for sequential execution
+    char *commands[MAX_ARGS];
+    int cmd_count = 0;
     
-    // Find the earliest operator
-    char *first_op = NULL;
-    if (semicolon && amp) {
-        first_op = (semicolon < amp) ? semicolon : amp;
-    } else if (semicolon) {
-        first_op = semicolon;
-    } else if (amp) {
-        // Check if it's a single & or &&
-        if (amp[1] == '&') {
-            first_op = amp;
-        } else {
-            first_op = amp;
+    commands[cmd_count++] = cmd_copy;
+    char *semicolon = cmd_copy;
+    
+    while ((semicolon = strchr(semicolon, ';')) != NULL) {
+        *semicolon = '\0';
+        commands[cmd_count++] = semicolon + 1;
+        semicolon++;
+    }
+    
+    // Execute each command sequentially
+    for (int i = 0; i < cmd_count; i++) {
+        char *cmd = commands[i];
+        
+        // Skip leading whitespace
+        while (*cmd == ' ' || *cmd == '\t') {
+            cmd++;
+        }
+        
+        // Skip empty commands
+        if (*cmd == '\0') {
+            continue;
+        }
+        
+        // Check if command should run in background
+        int run_in_background = 0;
+        char *amp = strrchr(cmd, '&'); // Find the last '&'
+        
+        if (amp != NULL) {
+            // Make sure it's not part of && operator
+            if ((amp == cmd || *(amp-1) != '&') && *(amp+1) == '\0') {
+                run_in_background = 1;
+                *amp = '\0'; // Remove the '&'
+            }
+        }
+        
+        // Execute the command group
+        execute_cmd_group(cmd, run_in_background);
+    }
+    
+    return 0;
+}
+
+/**
+ * Check for completed background jobs
+ * This is now a non-static function to match the header
+ */
+void check_background_jobs() {
+    int status;
+    pid_t pid;
+    
+    // Check if any background processes have completed using non-blocking waitpid
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        // Find the job in our array
+        for (int i = 0; i < bg_job_count; i++) {
+            if (bg_jobs[i].pid == pid && bg_jobs[i].running) {
+                // Mark job as completed
+                bg_jobs[i].running = 0;
+                
+                // Get the command name (first word)
+                char *cmd_name = get_command_name(bg_jobs[i].command);
+                
+                // Print message based on exit status
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    printf("%s with pid %d exited normally\n", cmd_name, pid);
+                } else {
+                    printf("%s with pid %d exited abnormally\n", cmd_name, pid);
+                }
+                
+                free(cmd_name); // Free the allocated memory
+                break;
+            }
         }
     }
+}
+
+/**
+ * Extract the command name from a command string
+ */
+static char* get_command_name(const char *command) {
+    char *cmd_copy = strdup(command);
+    char *cmd_name = strtok(cmd_copy, " \t");
     
-    // Extract the first command group
-    if (first_op) {
-        *first_op = '\0';
+    if (cmd_name) {
+        cmd_name = strdup(cmd_name);
+    } else {
+        cmd_name = strdup("unknown");
     }
     
-    // Execute the first command group
-    return execute_cmd_group(cmd_copy);
+    free(cmd_copy);
+    return cmd_name;
+}
+
+/**
+ * Add a new background job to the tracking array
+ */
+static void add_background_job(pid_t pid, const char *command) {
+    if (bg_job_count < MAX_BG_JOBS) {
+        bg_jobs[bg_job_count].pid = pid;
+        bg_jobs[bg_job_count].job_number = next_job_number++;
+        bg_jobs[bg_job_count].running = 1;
+        strncpy(bg_jobs[bg_job_count].command, command, MAX_COMMAND_LENGTH - 1);
+        bg_jobs[bg_job_count].command[MAX_COMMAND_LENGTH - 1] = '\0';
+        
+        // Print job information
+        printf("[%d] %d\n", bg_jobs[bg_job_count].job_number, pid);
+        
+        bg_job_count++;
+    }
 }
 
 /**
  * Execute a command group (commands separated by pipes)
  */
-static int execute_cmd_group(const char *cmd_group) {
+static int execute_cmd_group(const char *cmd_group, int run_in_background) {
     // Split the command group by pipes
     char cmd_copy[MAX_COMMAND_LENGTH];
     strncpy(cmd_copy, cmd_group, MAX_COMMAND_LENGTH - 1);
@@ -162,7 +269,7 @@ static int execute_cmd_group(const char *cmd_group) {
     }
     
     // Execute the pipeline
-    return execute_pipeline(commands, cmd_count);
+    return execute_pipeline(commands, cmd_count, run_in_background);
 }
 
 /**
@@ -197,9 +304,9 @@ static int execute_builtin(Command *cmd) {
 /**
  * Execute a pipeline of commands
  */
-static int execute_pipeline(Command *commands, int cmd_count) {
-    // If only one command and it's a built-in, execute it directly
-    if (cmd_count == 1 && is_builtin(commands[0].args[0])) {
+static int execute_pipeline(Command *commands, int cmd_count, int run_in_background) {
+    // If only one command and it's a built-in, execute it directly (but not in background)
+    if (cmd_count == 1 && is_builtin(commands[0].args[0]) && !run_in_background) {
         // Handle I/O redirection for built-ins
         int stdin_save = -1, stdout_save = -1;
         
@@ -263,7 +370,52 @@ static int execute_pipeline(Command *commands, int cmd_count) {
         }
     }
     
-    // Create child processes for each command
+    // Create a main child process for the entire pipeline
+    pid_t main_pid;
+    if (run_in_background) {
+        main_pid = fork();
+        
+        if (main_pid == -1) {
+            perror("fork");
+            return 1;
+        }
+        
+        if (main_pid > 0) {
+            // Parent process - add the job to our tracking array
+            char command_str[MAX_COMMAND_LENGTH] = "";
+            for (int i = 0; i < cmd_count; i++) {
+                for (int j = 0; j < commands[i].argc; j++) {
+                    strcat(command_str, commands[i].args[j]);
+                    strcat(command_str, " ");
+                }
+                if (i < cmd_count - 1) {
+                    strcat(command_str, "| ");
+                }
+            }
+            add_background_job(main_pid, command_str);
+            
+            // Close all pipe file descriptors in the parent
+            for (int i = 0; i < cmd_count - 1; i++) {
+                close(pipes[i][0]);
+                close(pipes[i][1]);
+            }
+            
+            return 0; // Parent returns immediately for background execution
+        }
+        
+        // Child process continues with execution
+        // Detach from terminal for background execution
+        setsid();
+        
+        // Redirect stdin to /dev/null for background processes
+        int dev_null = open("/dev/null", O_RDONLY);
+        if (dev_null != -1) {
+            dup2(dev_null, STDIN_FILENO);
+            close(dev_null);
+        }
+    }
+    
+    // Create child processes for each command in the pipeline
     pid_t pids[MAX_PIPES + 1];
     
     for (int i = 0; i < cmd_count; i++) {
@@ -271,7 +423,7 @@ static int execute_pipeline(Command *commands, int cmd_count) {
         
         if (pids[i] == -1) {
             perror("fork");
-            return 1;
+            exit(EXIT_FAILURE);
         }
         
         if (pids[i] == 0) {
@@ -340,7 +492,17 @@ static int execute_pipeline(Command *commands, int cmd_count) {
         close(pipes[i][1]);
     }
     
-    // Wait for all child processes
+    // If this is a background process child, exit after all commands complete
+    if (run_in_background) {
+        // Wait for all child processes in the pipeline
+        int status;
+        for (int i = 0; i < cmd_count; i++) {
+            waitpid(pids[i], &status, 0);
+        }
+        exit(EXIT_SUCCESS);
+    }
+    
+    // For foreground execution, wait for all child processes
     int status;
     for (int i = 0; i < cmd_count; i++) {
         waitpid(pids[i], &status, 0);

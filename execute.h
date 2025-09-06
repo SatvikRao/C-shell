@@ -8,4 +8,11 @@
  */
 int execute_command_line(const char *command);
 
+/**
+ * Check for and report completed background jobs
+ * This is automatically called by execute_command_line,
+ * but can also be called separately to check for completed jobs
+ */
+void check_background_jobs();
+
 #endif // EXECUTE_H
