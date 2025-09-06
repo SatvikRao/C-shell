@@ -17,6 +17,10 @@
 #define MAX_PIPES 16
 #define MAX_COMMAND_LENGTH 4096
 #define MAX_BG_JOBS 32
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+#define _GNU_SOURCE
+
 
 // Structure to hold a command with its redirections
 typedef struct {
@@ -33,11 +37,12 @@ typedef struct {
     char command[MAX_COMMAND_LENGTH]; // Command string
     int job_number;                 // Job number
     int running;                    // 1 if job is still running, 0 otherwise
+    int stopped;                    // 1 if job is stopped, 0 if running
 } BackgroundJob;
 
 // Global array to track background jobs
-static BackgroundJob bg_jobs[MAX_BG_JOBS];
-static int bg_job_count = 0;
+BackgroundJob bg_jobs[MAX_BG_JOBS];
+int bg_job_count = 0;
 static int next_job_number = 1;
 
 // Forward declarations
@@ -115,24 +120,38 @@ void check_background_jobs() {
     pid_t pid;
     
     // Check if any background processes have completed using non-blocking waitpid
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
         // Find the job in our array
         for (int i = 0; i < bg_job_count; i++) {
-            if (bg_jobs[i].pid == pid && bg_jobs[i].running) {
-                // Mark job as completed
-                bg_jobs[i].running = 0;
-                
-                // Get the command name (first word)
-                char *cmd_name = get_command_name(bg_jobs[i].command);
-                
-                // Print message based on exit status
-                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                    printf("%s with pid %d exited normally\n", cmd_name, pid);
-                } else {
-                    printf("%s with pid %d exited abnormally\n", cmd_name, pid);
+            if (bg_jobs[i].pid == pid) {
+                if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    // Job has terminated
+                    bg_jobs[i].running = 0;
+                    bg_jobs[i].stopped = 0;
+                    
+                    // Get the command name (first word)
+                    char *cmd_name = get_command_name(bg_jobs[i].command);
+                    
+                    // Print message based on exit status
+                    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                        printf("%s with pid %d exited normally\n", cmd_name, pid);
+                    } else {
+                        printf("%s with pid %d exited abnormally\n", cmd_name, pid);
+                    }
+                    
+                    free(cmd_name); // Free the allocated memory
+                } else if (WIFSTOPPED(status)) {
+                    // Job has been stopped
+                    bg_jobs[i].running = 1;  // Job is still running but in stopped state
+                    bg_jobs[i].stopped = 1;  // Mark as stopped
+                    
+                    // Print a message that the job is stopped
+                    printf("[%d] Stopped %s\n", bg_jobs[i].job_number, bg_jobs[i].command);
+                } else if (WIFCONTINUED(status)) {
+                    // Job has been continued
+                    bg_jobs[i].running = 1;
+                    bg_jobs[i].stopped = 0;
                 }
-                
-                free(cmd_name); // Free the allocated memory
                 break;
             }
         }
@@ -164,6 +183,7 @@ static void add_background_job(pid_t pid, const char *command) {
         bg_jobs[bg_job_count].pid = pid;
         bg_jobs[bg_job_count].job_number = next_job_number++;
         bg_jobs[bg_job_count].running = 1;
+        bg_jobs[bg_job_count].stopped = 0;  // Initialize as running
         strncpy(bg_jobs[bg_job_count].command, command, MAX_COMMAND_LENGTH - 1);
         bg_jobs[bg_job_count].command[MAX_COMMAND_LENGTH - 1] = '\0';
         
@@ -510,3 +530,33 @@ static int execute_pipeline(Command *commands, int cmd_count, int run_in_backgro
     
     return 0;
 }
+
+// Remove or comment out the unused function
+/*
+static void update_all_job_statuses() {
+    int status;
+    
+    for (int i = 0; i < bg_job_count; i++) {
+        if (bg_jobs[i].running) {
+            // Use WNOHANG to check status without blocking
+            pid_t result = waitpid(bg_jobs[i].pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
+            
+            if (result == bg_jobs[i].pid) {
+                // Status changed
+                if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    bg_jobs[i].running = 0;
+                    bg_jobs[i].stopped = 0;
+                } else if (WIFSTOPPED(status)) {
+                    bg_jobs[i].running = 1;
+                    bg_jobs[i].stopped = 1;
+                } else if (WIFCONTINUED(status)) {
+                    bg_jobs[i].running = 1;
+                    bg_jobs[i].stopped = 0;
+                }
+            }
+            // If result is 0, status hasn't changed
+            // If result is -1, there was an error
+        }
+    }
+}
+*/

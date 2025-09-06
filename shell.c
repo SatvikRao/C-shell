@@ -10,6 +10,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include "activities.h"
+#include "ping.h"
 
 // Buffer size for reading input
 #define INPUT_BUFFER_SIZE 4096
@@ -117,10 +119,21 @@ void run_shell() {
         
         // Check if it's a built-in command
         if (argc > 0) {
-            if (strcmp(args[0], "hop") == 0 || 
-                strcmp(args[0], "reveal") == 0 || 
-                strcmp(args[0], "log") == 0) {
-                // Built-in commands are handled inside execute_command_line
+            if (strcmp(args[0], "hop") == 0) {
+                handle_hop_command(argc, args);
+                continue;
+            } else if (strcmp(args[0], "reveal") == 0) {
+                handle_reveal_command(argc, args);
+                continue;
+            } else if (strcmp(args[0], "log") == 0) {
+                handle_log_command(argc, args);
+                continue;
+            } else if (strcmp(args[0], "activities") == 0) {
+                handle_activities_command(argc, args);
+                continue;
+            } else if (strcmp(args[0], "ping") == 0) {
+                handle_ping_command(argc, args);
+                continue;
             }
         }
         
