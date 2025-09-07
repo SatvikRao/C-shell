@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <signal.h>
+#include "signal_handlers.h"
+#include <termios.h>
 
 #define MAX_ARGS 64
 #define MAX_PIPES 16
@@ -49,10 +51,9 @@ static int next_job_number = 1;
 static int execute_cmd_group(const char *cmd_group, int run_in_background);
 static int execute_pipeline(Command *commands, int cmd_count, int run_in_background);
 static int execute_builtin(Command *cmd);
-// Remove the static declaration to match the header file
-// static void check_background_jobs();
 static void add_background_job(pid_t pid, const char *command);
 static char* get_command_name(const char *command);
+static void add_to_background_jobs(pid_t pid, pid_t pgid, int job_number, const char *command, int stopped);
 
 /**
  * Execute a command line, handling sequential and background operators
@@ -522,6 +523,57 @@ static int execute_pipeline(Command *commands, int cmd_count, int run_in_backgro
         exit(EXIT_SUCCESS);
     }
     
+    // For foreground execution:
+    if (!run_in_background) {
+        // Store process group as foreground job
+        char command_str[MAX_COMMAND_LENGTH] = "";
+        for (int i = 0; i < cmd_count; i++) {
+            for (int j = 0; j < commands[i].argc; j++) {
+                strcat(command_str, commands[i].args[j]);
+                strcat(command_str, " ");
+            }
+            if (i < cmd_count - 1) {
+                strcat(command_str, "| ");
+            }
+        }
+        
+        // Create a process group for the first command
+        setpgid(pids[0], pids[0]);
+        
+        // Set as foreground job for Ctrl-C and Ctrl-Z handling
+        int job_number = next_job_number++;
+        set_foreground_job_info(pids[0], pids[0], job_number, command_str);
+        
+        // Give control of the terminal to the foreground process group
+        tcsetpgrp(STDIN_FILENO, pids[0]);
+        
+        // Wait for all processes in the pipeline
+        int status;
+        int any_stopped = 0;
+        
+        for (int i = 0; i < cmd_count; i++) {
+            if (waitpid(pids[i], &status, WUNTRACED) > 0) {
+                if (WIFSTOPPED(status)) {
+                    any_stopped = 1;
+                }
+            }
+        }
+        
+        // If any process was stopped, add the entire pipeline to the background jobs
+        if (any_stopped) {
+            add_to_background_jobs(pids[0], pids[0], job_number, command_str, 1);
+            printf("[%d] Stopped %s\n", job_number, command_str);
+        }
+        
+        // Take back terminal control
+        tcsetpgrp(STDIN_FILENO, getpgrp());
+        
+        // Clear the foreground job
+        clear_foreground_job_info();
+        
+        return 0;
+    }
+    
     // For foreground execution, wait for all child processes
     int status;
     for (int i = 0; i < cmd_count; i++) {
@@ -531,32 +583,19 @@ static int execute_pipeline(Command *commands, int cmd_count, int run_in_backgro
     return 0;
 }
 
-// Remove or comment out the unused function
-/*
-static void update_all_job_statuses() {
-    int status;
-    
-    for (int i = 0; i < bg_job_count; i++) {
-        if (bg_jobs[i].running) {
-            // Use WNOHANG to check status without blocking
-            pid_t result = waitpid(bg_jobs[i].pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
-            
-            if (result == bg_jobs[i].pid) {
-                // Status changed
-                if (WIFEXITED(status) || WIFSIGNALED(status)) {
-                    bg_jobs[i].running = 0;
-                    bg_jobs[i].stopped = 0;
-                } else if (WIFSTOPPED(status)) {
-                    bg_jobs[i].running = 1;
-                    bg_jobs[i].stopped = 1;
-                } else if (WIFCONTINUED(status)) {
-                    bg_jobs[i].running = 1;
-                    bg_jobs[i].stopped = 0;
-                }
-            }
-            // If result is 0, status hasn't changed
-            // If result is -1, there was an error
-        }
+/**
+ * Add a process to the background jobs list
+ */
+static void add_to_background_jobs(pid_t pid, pid_t pgid, int job_number, const char *command, int stopped) {
+    if (bg_job_count < MAX_BG_JOBS) {
+        bg_jobs[bg_job_count].pid = pid;
+        bg_jobs[bg_job_count].job_number = job_number;
+        bg_jobs[bg_job_count].running = 1;
+        bg_jobs[bg_job_count].stopped = stopped;
+        strncpy(bg_jobs[bg_job_count].command, command, MAX_COMMAND_LENGTH - 1);
+        bg_jobs[bg_job_count].command[MAX_COMMAND_LENGTH - 1] = '\0';
+        
+        bg_job_count++;
     }
 }
-*/
+

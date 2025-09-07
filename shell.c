@@ -12,6 +12,7 @@
 #include <signal.h>
 #include "activities.h"
 #include "ping.h"
+#include "signal_handlers.h"
 
 // Buffer size for reading input
 #define INPUT_BUFFER_SIZE 4096
@@ -48,6 +49,9 @@ int initialize_shell() {
         return 1;
     }
     
+    // Initialize signal handlers
+    initialize_signal_handlers();
+    
     return 0;
 }
 
@@ -83,7 +87,8 @@ void run_shell() {
         // Read user input
         if (fgets(input, INPUT_BUFFER_SIZE, stdin) == NULL) {
             // Handle EOF (Ctrl+D)
-            printf("\nExiting shell\n");
+            handle_eof();
+            // We won't reach here if handle_eof is implemented correctly
             break;
         }
         
