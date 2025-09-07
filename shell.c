@@ -13,6 +13,7 @@
 #include "activities.h"
 #include "ping.h"
 #include "signal_handlers.h"
+#include "fg_bg.h"
 
 // Buffer size for reading input
 #define INPUT_BUFFER_SIZE 4096
@@ -138,6 +139,12 @@ void run_shell() {
                 continue;
             } else if (strcmp(args[0], "ping") == 0) {
                 handle_ping_command(argc, args);
+                continue;
+            } else if (strcmp(args[0], "fg") == 0) {
+                handle_fg_command(argc, args);
+                continue;
+            } else if (strcmp(args[0], "bg") == 0) {
+                handle_bg_command(argc, args);
                 continue;
             }
         }
