@@ -92,7 +92,7 @@ bool should_drop_packet() {
 
 // Send a packet with potential simulated loss
 int send_packet(int sockfd, const struct packet *pkt, const struct sockaddr *addr, socklen_t addr_len) {
-    if (should_drop_packet()) {
+    if (should_drop_packet() && pkt->header.flags == 0) {
         if (verbose_logging) {
             log_message("DROP DATA SEQ=%u", pkt->header.seq_num);
         }
@@ -328,85 +328,192 @@ bool server_handshake(int sockfd, struct sockaddr *client_addr, socklen_t *addr_
 // Client-side four-way termination
 bool client_terminate(int sockfd, struct sockaddr *server_addr, socklen_t addr_len, uint32_t seq_num, uint32_t ack_num) {
     struct packet pkt;
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+    
+    printf("Initiating connection termination...\n");
     
     // Step 1: Send FIN
     prepare_packet(&pkt, seq_num, ack_num, FIN_FLAG, BUFFER_SIZE, NULL, 0);
     send_packet(sockfd, &pkt, server_addr, addr_len);
     log_message("SND FIN SEQ=%u", seq_num);
     
-    // Step 2: Wait for ACK
-    if (recv_packet(sockfd, &pkt, server_addr, &addr_len) <= 0) {
-        perror("Termination failed: No ACK received");
-        return false;
+    // Step 2: Wait for ACK with timeout
+    fd_set read_fds;
+    struct timeval timeout;
+    int max_retries = 3;
+    int retries = 0;
+    
+    while (retries < max_retries) {
+        FD_ZERO(&read_fds);
+        FD_SET(sockfd, &read_fds);
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        
+        int select_result = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+        if (select_result > 0) {
+            if (recv_packet(sockfd, &pkt, server_addr, &addr_len) > 0) {
+                if ((pkt.header.flags & ACK_FLAG) == ACK_FLAG) {
+                    log_message("RCV ACK FOR FIN");
+                    break;
+                }
+            }
+        } else {
+            retries++;
+            printf("Retrying FIN (attempt %d/%d)...\n", retries, max_retries);
+            send_packet(sockfd, &pkt, server_addr, addr_len);
+        }
     }
     
-    if ((pkt.header.flags & ACK_FLAG) != ACK_FLAG) {
-        fprintf(stderr, "Termination failed: Expected ACK flag\n");
+    if (retries >= max_retries) {
+        fprintf(stderr, "Failed to receive ACK for FIN\n");
+        fcntl(sockfd, F_SETFL, flags);
         return false;
     }
-    
-    log_message("RCV ACK FOR FIN");
     
     // Step 3: Wait for FIN from server
-    if (recv_packet(sockfd, &pkt, server_addr, &addr_len) <= 0) {
-        perror("Termination failed: No FIN received");
+    retries = 0;
+    bool received_fin = false;
+    
+    while (retries < max_retries && !received_fin) {
+        FD_ZERO(&read_fds);
+        FD_SET(sockfd, &read_fds);
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        
+        int select_result = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+        if (select_result > 0) {
+            if (recv_packet(sockfd, &pkt, server_addr, &addr_len) > 0) {
+                if ((pkt.header.flags & FIN_FLAG) == FIN_FLAG) {
+                    log_message("RCV FIN SEQ=%u", pkt.header.seq_num);
+                    received_fin = true;
+                    
+                    // Step 4: Send ACK
+                    prepare_packet(&pkt, seq_num + 1, pkt.header.seq_num + 1, ACK_FLAG, BUFFER_SIZE, NULL, 0);
+                    send_packet(sockfd, &pkt, server_addr, addr_len);
+                    log_message("SND ACK=%u", pkt.header.seq_num + 1);
+                    
+                    printf("Connection terminated successfully\n");
+                    fcntl(sockfd, F_SETFL, flags);
+                    return true;
+                }
+            }
+        } else {
+            retries++;
+        }
+    }
+    
+    if (!received_fin) {
+        fprintf(stderr, "Failed to receive FIN from server\n");
+        fcntl(sockfd, F_SETFL, flags);
         return false;
     }
     
-    if ((pkt.header.flags & FIN_FLAG) != FIN_FLAG) {
-        fprintf(stderr, "Termination failed: Expected FIN flag\n");
-        return false;
-    }
-    
-    log_message("RCV FIN SEQ=%u", pkt.header.seq_num);
-    
-    // Step 4: Send ACK
-    prepare_packet(&pkt, seq_num + 1, pkt.header.seq_num + 1, ACK_FLAG, BUFFER_SIZE, NULL, 0);
-    send_packet(sockfd, &pkt, server_addr, addr_len);
-    log_message("SND ACK=%u", pkt.header.seq_num + 1);
-    
+    fcntl(sockfd, F_SETFL, flags);
     return true;
 }
 
 // Server-side four-way termination
 bool server_terminate(int sockfd, struct sockaddr *client_addr, socklen_t addr_len, uint32_t seq_num, uint32_t ack_num) {
     struct packet pkt;
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
     
-    // Step 1: Wait for FIN
-    if (recv_packet(sockfd, &pkt, client_addr, &addr_len) <= 0) {
+    // Step 1: Wait for FIN with timeout
+    fd_set read_fds;
+    struct timeval timeout;
+    int max_wait_time = 10; // 10 seconds max wait for FIN
+    bool received_fin = false;
+    
+    //printf("Server waiting for client to initiate termination...\n");
+    
+    for (int i = 0; i < max_wait_time; i++) {
+        FD_ZERO(&read_fds);
+        FD_SET(sockfd, &read_fds);
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        
+        int select_result = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+        if (select_result > 0) {
+            if (recv_packet(sockfd, &pkt, client_addr, &addr_len) > 0) {
+                if ((pkt.header.flags & FIN_FLAG) == FIN_FLAG) {
+                    log_message("RCV FIN SEQ=%u", pkt.header.seq_num);
+                    received_fin = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (!received_fin) {
+        printf("No FIN received, server initiating termination...\n");
+        // Server initiates termination if client doesn't
+        prepare_packet(&pkt, seq_num, ack_num, FIN_FLAG, BUFFER_SIZE, NULL, 0);
+        send_packet(sockfd, &pkt, client_addr, addr_len);
+        log_message("SND FIN SEQ=%u", seq_num);
+        
+        // Wait for ACK
+        FD_ZERO(&read_fds);
+        FD_SET(sockfd, &read_fds);
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        
+        if (select(sockfd + 1, &read_fds, NULL, NULL, &timeout) > 0) {
+            if (recv_packet(sockfd, &pkt, client_addr, &addr_len) > 0 && 
+                (pkt.header.flags & ACK_FLAG) == ACK_FLAG) {
+                log_message("RCV ACK=%u", pkt.header.ack_num);
+                printf("Connection terminated successfully\n");
+                fcntl(sockfd, F_SETFL, flags);
+                return true;
+            }
+        }
+        
+        printf("No ACK received, terminating anyway\n");
+        fcntl(sockfd, F_SETFL, flags);
         return false;
     }
     
-    if ((pkt.header.flags & FIN_FLAG) != FIN_FLAG) {
-        return false;
-    }
-    
-    log_message("RCV FIN SEQ=%u", pkt.header.seq_num);
-    
-    // Step 2: Send ACK
+    // Step 2: Send ACK for client's FIN
     prepare_packet(&pkt, seq_num, pkt.header.seq_num + 1, ACK_FLAG, BUFFER_SIZE, NULL, 0);
     send_packet(sockfd, &pkt, client_addr, addr_len);
     log_message("SND ACK FOR FIN");
     
-    // Step 3: Send FIN
+    // Step 3: Send server's FIN
     prepare_packet(&pkt, seq_num, ack_num, FIN_FLAG, BUFFER_SIZE, NULL, 0);
     send_packet(sockfd, &pkt, client_addr, addr_len);
     log_message("SND FIN SEQ=%u", seq_num);
     
-    // Step 4: Wait for ACK
-    if (recv_packet(sockfd, &pkt, client_addr, &addr_len) <= 0) {
-        perror("Termination failed: No ACK received");
-        return false;
+    // Step 4: Wait for ACK with timeout
+    int retries = 0;
+    int max_retries = 3;
+    bool received_ack = false;
+    
+    while (retries < max_retries && !received_ack) {
+        FD_ZERO(&read_fds);
+        FD_SET(sockfd, &read_fds);
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        
+        int select_result = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+        if (select_result > 0) {
+            if (recv_packet(sockfd, &pkt, client_addr, &addr_len) > 0) {
+                if ((pkt.header.flags & ACK_FLAG) == ACK_FLAG) {
+                    log_message("RCV ACK=%u", pkt.header.ack_num);
+                    received_ack = true;
+                    printf("Connection terminated successfully\n");
+                    break;
+                }
+            }
+        } else {
+            retries++;
+            // Resend FIN
+            prepare_packet(&pkt, seq_num, ack_num, FIN_FLAG, BUFFER_SIZE, NULL, 0);
+            send_packet(sockfd, &pkt, client_addr, addr_len);
+        }
     }
     
-    if ((pkt.header.flags & ACK_FLAG) != ACK_FLAG) {
-        fprintf(stderr, "Termination failed: Expected ACK flag\n");
-        return false;
-    }
-    
-    log_message("RCV ACK=%u", pkt.header.ack_num);
-    
-    return true;
+    fcntl(sockfd, F_SETFL, flags);
+    return received_ack;
 }
 
 // Calculate time difference in milliseconds
@@ -561,6 +668,10 @@ bool send_file(int sockfd, struct sockaddr *dest_addr, socklen_t addr_len,
     }
     
     fclose(file);
+    printf("File transfer complete. Initiating connection termination...\n");
+    // Add a short delay to ensure the last ACKs are processed
+    usleep(500000);  // 500ms
+    
     return true;
 }
 
@@ -655,6 +766,10 @@ bool receive_file(int sockfd, struct sockaddr *src_addr, socklen_t *addr_len,
     fclose(file);
     free(buffer);
     free(received);
+    // Add cleanup and final message when file is completely received
+    printf("File received successfully.\n");
+    fflush(stdout);
+    
     return true;
 }
 
@@ -853,10 +968,12 @@ int run_server(int port, bool chat_mode_enabled, float packet_loss_rate) {
         if (receive_file(sockfd, (struct sockaddr *)&client_addr, &client_addr_len, "received_file", &server_seq, &ack_num)) {
             // Calculate and print MD5
             calculate_md5("received_file");
+            
+            // Wait for connection termination or initiate if needed
+            if (!server_terminate(sockfd, (struct sockaddr *)&client_addr, client_addr_len, server_seq, ack_num)) {
+                fprintf(stderr, "Connection termination failed, closing anyway\n");
+            }
         }
-        
-        // Wait for connection termination
-        server_terminate(sockfd, (struct sockaddr *)&client_addr, client_addr_len, server_seq, ack_num);
     }
     
     if (log_file) {
@@ -918,10 +1035,15 @@ int run_client(const char *server_ip, int server_port, const char *input_file,
         // Send file
         if (!send_file(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr), input_file, &client_seq, &ack_num)) {
             fprintf(stderr, "File transfer failed\n");
+            if (log_file) fclose(log_file);
+            close(sockfd);
+            return -1;
         }
         
         // Initiate connection termination
-        client_terminate(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr), client_seq, ack_num);
+        if (!client_terminate(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr), client_seq, ack_num)) {
+            fprintf(stderr, "Connection termination failed, closing anyway\n");
+        }
     }
     
     if (log_file) {
