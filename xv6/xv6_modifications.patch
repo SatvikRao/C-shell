@@ -1,0 +1,606 @@
+diff --git a/Makefile b/Makefile
+index 2d5f9e4..3eb018c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -73,6 +73,15 @@ CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
+ CFLAGS += -I.
+ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ 
++SCHEDULER ?= RR 
++
++ifeq ($(SCHEDULER),FCFS)
++CFLAGS += -DFCFS
++endif
++ifeq ($(SCHEDULER),CFS)
++CFLAGS += -DCFS
++endif
++
+ # Disable PIE when possible (for Ubuntu 16.10 toolchain)
+ ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
+ CFLAGS += -fno-pie -no-pie
+@@ -139,9 +148,8 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
+-	$U/_logstress\
+ 	$U/_forphan\
+-	$U/_dorphan\
++	$U/_readcount\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+@@ -163,7 +171,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 3
++CPUS := 1
+ endif
+ 
+ QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 122d9ca..1d029a4 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -136,6 +136,30 @@ int             fetchstr(uint64, char*, int);
+ int             fetchaddr(uint64, uint64*);
+ void            syscall();
+ 
++// sysfile.c
++uint64             sys_chdir(void);
++uint64            sys_close(void);
++uint64          sys_dup(void);
++uint64          sys_exec(void);
++uint64          sys_exit(void);
++uint64          sys_fork(void);
++uint64          sys_fstat(void);
++uint64          sys_getpid(void);
++uint64          sys_kill(void);
++uint64          sys_link(void);
++uint64          sys_mkdir(void);
++uint64          sys_mknod(void);
++uint64          sys_open(void);
++uint64          sys_pipe(void);
++uint64          sys_read(void);
++uint64          sys_sbrk(void);
++uint64          sys_pause(void);
++uint64          sys_unlink(void);
++uint64          sys_wait(void);
++uint64          sys_write(void);
++uint64          sys_uptime(void);
++uint64          sys_getreadcount(void);
++
+ // trap.c
+ extern uint     ticks;
+ void            trapinit(void);
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 9d6cf3f..a19e8fe 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -20,6 +20,40 @@ static void freeproc(struct proc *p);
+ 
+ extern char trampoline[]; // trampoline.S
+ 
++extern uint ticks; 
++
++#ifdef CFS
++// Integer fixed-point-ish step: multiply or divide by 5/4 per nice step.
++int calc_weight(int nice) {
++  // clamp to [-20, 19]
++  if (nice < -20) nice = -20;
++  if (nice > 19)  nice = 19;
++
++  long w = 1024; // base at nice=0
++
++  if (nice > 0) {
++    for (int i = 0; i < nice; i++)
++      w = (w * 4) / 5;    // divide by 1.25
++  } else if (nice < 0) {
++    for (int i = 0; i < -nice; i++)
++      w = (w * 5) / 4;    // multiply by 1.25
++  }
++
++  if (w < 15) w = 15;           // floor to spec's lowest weight
++  if (w > 88761) w = 88761;     // cap to spec's highest weight
++  return (int)w;
++}
++
++void update_vruntime_on_tick(struct proc *p){
++  if(!p) return;
++  // scale vruntime by 1024/weight to normalize
++  // Use 64-bit to avoid overflow.
++  uint64 inc = (uint64)1024;
++  inc = (inc * 1) / (p->weight ? p->weight : 1);
++  if(inc < 1) inc = 1; // ensure progress
++  p->vruntime += inc;
++}
++#endif
+ // helps ensure that wakeups of wait()ing
+ // parents are not lost. helps obey the
+ // memory model when using p->parent.
+@@ -146,6 +180,15 @@ found:
+   p->context.ra = (uint64)forkret;
+   p->context.sp = p->kstack + PGSIZE;
+ 
++    p->ctime = ticks;     // record birth time for FCFS
++
++#ifdef CFS
++  p->nice = 0;
++  p->weight = calc_weight(0);
++  p->vruntime = 0;
++  p->slice_left = 0;
++#endif
++
+   return p;
+ }
+ 
+@@ -418,47 +461,127 @@ kwait(uint64 addr)
+ //  - swtch to start running that process.
+ //  - eventually that process transfers control
+ //    via swtch back to the scheduler.
++// kernel/proc.c
++
+ void
+ scheduler(void)
+ {
+-  struct proc *p;
+   struct cpu *c = mycpu();
+-
+   c->proc = 0;
++
+   for(;;){
+-    // The most recent process to run may have had interrupts
+-    // turned off; enable them to avoid a deadlock if all
+-    // processes are waiting. Then turn them back off
+-    // to avoid a possible race between an interrupt
+-    // and wfi.
++    // Enable device interrupts on this CPU.
+     intr_on();
+-    intr_off();
+ 
+-    int found = 0;
+-    for(p = proc; p < &proc[NPROC]; p++) {
++#ifdef CFS
++    // --------------------------- CFS ---------------------------
++    // Pass 0: count RUNNABLE
++    int nr = 0;
++    for(struct proc *p = proc; p < &proc[NPROC]; p++){
++      acquire(&p->lock);
++      if(p->state == RUNNABLE) nr++;
++      release(&p->lock);
++    }
++    if(nr == 0){
++      // nothing runnable; loop and wait for a wakeup/interrupt
++      continue;
++    }
++
++    // time slice = max(3, 48 / nrunnable)
++    int target_latency = 48;
++    int base_slice = target_latency / nr;
++    if(base_slice < 3) base_slice = 3;
++
++    // Pass 1: find the min-vruntime candidate WITHOUT keeping any locks
++    struct proc *best = 0;
++    uint64 best_vr = 0;
++
++    for(struct proc *p = proc; p < &proc[NPROC]; p++){
++      acquire(&p->lock);
++      if(p->state == RUNNABLE){
++        if(best == 0 || p->vruntime < best_vr){
++          best = p;
++          best_vr = p->vruntime;
++        }
++      }
++      release(&p->lock);
++    }
++
++    // Log snapshot BEFORE committing to run (no locks held)
++    printf("[Scheduler Tick]\n");
++    for(struct proc *p = proc; p < &proc[NPROC]; p++){
++      acquire(&p->lock);
++      if(p->state == RUNNABLE){
++        printf("PID: %d | vRuntime: %lu\n", p->pid, p->vruntime);
++      }
++      release(&p->lock);
++    }
++    if(best)
++      printf("--> Scheduling PID %d (lowest vRuntime: %lu)\n", best->pid, best_vr);
++    else {
++      printf("--> No RUNNABLE process found\n");
++      continue;
++    }
++
++    // Pass 2: lock & revalidate, then run
++    acquire(&best->lock);
++    if(best->state == RUNNABLE){
++      best->slice_left = base_slice;
++      best->state = RUNNING;
++      c->proc = best;
++      swtch(&c->context, &best->context);
++      c->proc = 0;
++    }
++    release(&best->lock);
++
++#elif defined(FCFS)
++    // --------------------------- FCFS --------------------------
++    // select RUNNABLE with earliest creation time (ctime)
++    struct proc *best = 0;
++    uint64 best_ctime = 0;
++
++    for(struct proc *p = proc; p < &proc[NPROC]; p++){
++      acquire(&p->lock);
++      if(p->state == RUNNABLE){
++        if(best == 0 || p->ctime < best_ctime){
++          best = p;
++          best_ctime = p->ctime;
++        }
++      }
++      release(&p->lock);
++    }
++
++    if(best){
++      // Optional: show which PID was chosen to avoid starvation
++      // printf("Scheduling PID %d (runtime=%lu)\n", best->pid, best_ctime);
++
++      acquire(&best->lock);
++      if(best->state == RUNNABLE){
++        best->state = RUNNING;
++        c->proc = best;
++        swtch(&c->context, &best->context);
++        c->proc = 0;
++      }
++      release(&best->lock);
++    }
++
++#else
++    // --------------------- Default Round-Robin -----------------
++    for(struct proc *p = proc; p < &proc[NPROC]; p++){
+       acquire(&p->lock);
+-      if(p->state == RUNNABLE) {
+-        // Switch to chosen process.  It is the process's job
+-        // to release its lock and then reacquire it
+-        // before jumping back to us.
++      if(p->state == RUNNABLE){
+         p->state = RUNNING;
+         c->proc = p;
+         swtch(&c->context, &p->context);
+-
+-        // Process is done running for now.
+-        // It should have changed its p->state before coming back.
+         c->proc = 0;
+-        found = 1;
+       }
+       release(&p->lock);
+     }
+-    if(found == 0) {
+-      // nothing to run; stop running on this core until an interrupt.
+-      asm volatile("wfi");
+-    }
++#endif
+   }
+ }
+ 
++
+ // Switch to scheduler.  Must hold only p->lock
+ // and have changed proc->state. Saves and restores
+ // intena because intena is a property of this
+@@ -670,18 +793,15 @@ procdump(void)
+   [RUNNING]   "run   ",
+   [ZOMBIE]    "zombie"
+   };
+-  struct proc *p;
+-  char *state;
+-
+-  printf("\n");
+-  for(p = proc; p < &proc[NPROC]; p++){
++  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+     if(p->state == UNUSED)
+       continue;
+-    if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
+-      state = states[p->state];
+-    else
+-      state = "???";
+-    printf("%d %s %s", p->pid, state, p->name);
++    printf("%d %s", p->pid, states[p->state]);
++    printf(" ctime=%ld", p->ctime);
++#ifdef CFS
++    printf(" nice=%d wt=%d vrun=%lu slice=%d",
++           p->nice, p->weight, p->vruntime, p->slice_left);
++#endif
+     printf("\n");
+   }
+ }
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..ccf6e94 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,18 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++
++  uint64 ctime;        // creation time (ticks) - used by FCFS
++
++#ifdef CFS
++  int nice;            // [-20, +19], default 0
++  int weight;          // computed from nice
++  uint64 vruntime;     // virtual runtime (scaled)
++  int slice_left;      // ticks remaining in current timeslice
++#endif
+ };
++
++#ifdef CFS
++int  calc_weight(int nice);
++void update_vruntime_on_tick(struct proc *p); // called each timer tick
++#endif
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..b694c91 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,7 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_getreadcount(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +127,7 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_getreadcount] sys_getreadcount,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..0cf477a 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_getreadcount 22
+diff --git a/kernel/sysfile.c b/kernel/sysfile.c
+index d8234ce..890b0fb 100644
+--- a/kernel/sysfile.c
++++ b/kernel/sysfile.c
+@@ -16,6 +16,9 @@
+ #include "file.h"
+ #include "fcntl.h"
+ 
++// Global variable to track total bytes read
++uint64 total_bytes_read = 0;
++
+ // Fetch the nth word-sized system call argument as a file descriptor
+ // and return both the descriptor and the corresponding struct file.
+ static int
+@@ -76,7 +79,12 @@ sys_read(void)
+   argint(2, &n);
+   if(argfd(0, 0, &f) < 0)
+     return -1;
+-  return fileread(f, p, n);
++  int bytes_read = fileread(f, p, n);
++  if (bytes_read > 0) {
++    // Update the total bytes read counter
++    total_bytes_read += bytes_read;
++  }
++  return bytes_read;
+ }
+ 
+ uint64
+@@ -503,3 +511,9 @@ sys_pipe(void)
+   }
+   return 0;
+ }
++
++uint64
++sys_getreadcount(void)
++{
++  return total_bytes_read;
++}
+diff --git a/kernel/trap.c b/kernel/trap.c
+index a41cd69..b4084e2 100644
+--- a/kernel/trap.c
++++ b/kernel/trap.c
+@@ -81,8 +81,31 @@ usertrap(void)
+     kexit(-1);
+ 
+   // give up the CPU if this is a timer interrupt.
+-  if(which_dev == 2)
+-    yield();
++  if(which_dev == 2){
++    acquire(&tickslock);
++    ticks++;
++    wakeup(&ticks);
++    release(&tickslock);
++    #ifdef CFS
++    struct proc *p = myproc();
++    if(p && p->state == RUNNING){
++      // account 1 tick of runtime into vruntime (weighted)
++      update_vruntime_on_tick(p);
++
++      // consume timeslice
++      if(--p->slice_left <= 0){
++        yield(); // preempt at end of slice
++      }
++    }
++#else
++#ifdef FCFS
++    // FCFS is non-preemptive: do NOT yield here
++#else
++    // RR default: xv6 normally does this
++    if(myproc() && myproc()->state == RUNNING) yield();
++#endif
++#endif
++  }
+ 
+   prepare_return();
+ 
+diff --git a/user/user.h b/user/user.h
+index ac84de9..38543f4 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,7 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++int getreadcount(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..4fb2719 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -6,39 +6,113 @@ print "# generated by usys.pl - do not edit\n";
+ 
+ print "#include \"kernel/syscall.h\"\n";
+ 
+-sub entry {
+-    my $prefix = "sys_";
+-    my $name = shift;
+-    if ($name eq "sbrk") {
+-	print ".global $prefix$name\n";
+-	print "$prefix$name:\n";
+-    } else {
+-	print ".global $name\n";
+-	print "$name:\n";
+-    }
+-    print " li a7, SYS_${name}\n";
+-    print " ecall\n";
+-    print " ret\n";
+-}
+-	
+-entry("fork");
+-entry("exit");
+-entry("wait");
+-entry("pipe");
+-entry("read");
+-entry("write");
+-entry("close");
+-entry("kill");
+-entry("exec");
+-entry("open");
+-entry("mknod");
+-entry("unlink");
+-entry("fstat");
+-entry("link");
+-entry("mkdir");
+-entry("chdir");
+-entry("dup");
+-entry("getpid");
+-entry("sbrk");
+-entry("pause");
+-entry("uptime");
++print ".global fork\n";
++print "fork:\n";
++print " li a7, SYS_fork\n";
++print " ecall\n";
++print " ret\n";
++print ".global exit\n";
++print "exit:\n";
++print " li a7, SYS_exit\n";
++print " ecall\n";
++print " ret\n";
++print ".global wait\n";
++print "wait:\n";
++print " li a7, SYS_wait\n";
++print " ecall\n";
++print " ret\n";
++print ".global pipe\n";
++print "pipe:\n";
++print " li a7, SYS_pipe\n";
++print " ecall\n";
++print " ret\n";
++print ".global read\n";
++print "read:\n";
++print " li a7, SYS_read\n";
++print " ecall\n";
++print " ret\n";
++print ".global write\n";
++print "write:\n";
++print " li a7, SYS_write\n";
++print " ecall\n";
++print " ret\n";
++print ".global close\n";
++print "close:\n";
++print " li a7, SYS_close\n";
++print " ecall\n";
++print " ret\n";
++print ".global kill\n";
++print "kill:\n";
++print " li a7, SYS_kill\n";
++print " ecall\n";
++print " ret\n";
++print ".global exec\n";
++print "exec:\n";
++print " li a7, SYS_exec\n";
++print " ecall\n";
++print " ret\n";
++print ".global open\n";
++print "open:\n";
++print " li a7, SYS_open\n";
++print " ecall\n";
++print " ret\n";
++print ".global mknod\n";
++print "mknod:\n";
++print " li a7, SYS_mknod\n";
++print " ecall\n";
++print " ret\n";
++print ".global unlink\n";
++print "unlink:\n";
++print " li a7, SYS_unlink\n";
++print " ecall\n";
++print " ret\n";
++print ".global fstat\n";
++print "fstat:\n";
++print " li a7, SYS_fstat\n";
++print " ecall\n";
++print " ret\n";
++print ".global link\n";
++print "link:\n";
++print " li a7, SYS_link\n";
++print " ecall\n";
++print " ret\n";
++print ".global mkdir\n";
++print "mkdir:\n";
++print " li a7, SYS_mkdir\n";
++print " ecall\n";
++print " ret\n";
++print ".global chdir\n";
++print "chdir:\n";
++print " li a7, SYS_chdir\n";
++print " ecall\n";
++print " ret\n";
++print ".global dup\n";
++print "dup:\n";
++print " li a7, SYS_dup\n";
++print " ecall\n";
++print " ret\n";
++print ".global getpid\n";
++print "getpid:\n";
++print " li a7, SYS_getpid\n";
++print " ecall\n";
++print " ret\n";
++print ".global sys_sbrk\n";
++print "sys_sbrk:\n";
++print " li a7, SYS_sbrk\n";
++print " ecall\n";
++print " ret\n";
++print ".global pause\n";
++print "pause:\n";
++print " li a7, SYS_pause\n";
++print " ecall\n";
++print " ret\n";
++print ".global uptime\n";
++print "uptime:\n";
++print " li a7, SYS_uptime\n";
++print " ecall\n";
++print " ret\n";
++print ".global getreadcount\n";
++print "getreadcount:\n";
++print " li a7, SYS_getreadcount\n";
++print " ecall\n";
++print " ret\n";
