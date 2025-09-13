@@ -18,6 +18,8 @@
 #define TIMEOUT_MS 500
 #define BUFFER_SIZE 65535
 
+//LLM generated
+
 // S.H.A.M. Header Structure
 struct sham_header {
     uint32_t seq_num;    // Sequence Number
