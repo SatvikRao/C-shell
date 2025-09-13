@@ -2,6 +2,9 @@
 #include "hop.h"
 #include "reveal.h"
 #include "log.h"
+#include "activities.h"
+#include "ping.h"
+#include "fg_bg.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,17 +69,34 @@ int execute_command_line(const char *command) {
     strncpy(cmd_copy, command, MAX_COMMAND_LENGTH - 1);
     cmd_copy[MAX_COMMAND_LENGTH - 1] = '\0';
     
-    // Split the command by semicolons for sequential execution
+    // Split the command by both semicolons and ampersands for sequential execution
     char *commands[MAX_ARGS];
     int cmd_count = 0;
+    int background_flags[MAX_ARGS] = {0}; // Track which commands should run in background
     
-    commands[cmd_count++] = cmd_copy;
-    char *semicolon = cmd_copy;
+    // Start with the first command
+    commands[0] = cmd_copy;
+    cmd_count = 1;
     
-    while ((semicolon = strchr(semicolon, ';')) != NULL) {
-        *semicolon = '\0';
-        commands[cmd_count++] = semicolon + 1;
-        semicolon++;
+    // Process the command string to find delimiters (both ; and &)
+    char *current = cmd_copy;
+    while (*current) {
+        if (*current == ';') {
+            *current = '\0';
+            commands[cmd_count++] = current + 1;
+            background_flags[cmd_count - 2] = 0; // Previous command is not background
+        } 
+        else if (*current == '&') {
+            // Check if it's a single & (not &&)
+            if (current == cmd_copy || *(current-1) != '&') {
+                if (*(current+1) != '&') {
+                    *current = '\0';
+                    commands[cmd_count++] = current + 1;
+                    background_flags[cmd_count - 2] = 1; // Previous command is background
+                }
+            }
+        }
+        current++;
     }
     
     // Execute each command sequentially
@@ -93,15 +113,19 @@ int execute_command_line(const char *command) {
             continue;
         }
         
-        // Check if command should run in background
-        int run_in_background = 0;
-        char *amp = strrchr(cmd, '&'); // Find the last '&'
+        // Check if the last command should run in background (trailing &)
+        int run_in_background = background_flags[i];
         
-        if (amp != NULL) {
-            // Make sure it's not part of && operator
-            if ((amp == cmd || *(amp-1) != '&') && *(amp+1) == '\0') {
-                run_in_background = 1;
-                *amp = '\0'; // Remove the '&'
+        // Also check for trailing & in the last command
+        if (i == cmd_count - 1) {
+            char *amp = strrchr(cmd, '&'); // Find the last '&'
+            
+            if (amp != NULL) {
+                // Make sure it's not part of && operator
+                if ((amp == cmd || *(amp-1) != '&') && *(amp+1) == '\0') {
+                    run_in_background = 1;
+                    *amp = '\0'; // Remove the '&'
+                }
             }
         }
         
@@ -299,7 +323,11 @@ static int execute_cmd_group(const char *cmd_group, int run_in_background) {
 static int is_builtin(const char *cmd) {
     return (strcmp(cmd, "hop") == 0 ||
             strcmp(cmd, "reveal") == 0 ||
-            strcmp(cmd, "log") == 0);
+            strcmp(cmd, "log") == 0 ||
+            strcmp(cmd, "activities") == 0 ||
+            strcmp(cmd, "fg") == 0 ||
+            strcmp(cmd, "bg") == 0 ||
+            strcmp(cmd, "ping") == 0);
 }
 
 /**
@@ -317,7 +345,16 @@ static int execute_builtin(Command *cmd) {
         return handle_reveal_command(argc, argv);
     } else if (strcmp(argv[0], "log") == 0) {
         return handle_log_command(argc, argv);
+    } else if (strcmp(argv[0], "activities") == 0) {
+        return handle_activities_command(argc, argv);
+    } else if (strcmp(argv[0], "fg") == 0) {
+        return handle_fg_command(argc, argv);
+    } else if (strcmp(argv[0], "bg") == 0) {
+        return handle_bg_command(argc, argv);
+    } else if (strcmp(argv[0], "ping") == 0) {
+        return handle_ping_command(argc, argv);
     }
+
     
     return 1; // Not a built-in command
 }

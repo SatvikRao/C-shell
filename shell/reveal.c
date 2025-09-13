@@ -110,8 +110,8 @@ int handle_reveal_command(int argc, char *argv[]) {
     
     // Parse flags
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '-' && argv[i][1] != '\0') {
-            // This is a flag argument
+        if (argv[i][0] == '-' && strlen(argv[i]) > 1) {
+            // This is a flag argument (not just "-" which is for previous dir)
             for (int j = 1; argv[i][j] != '\0'; j++) {
                 if (argv[i][j] == 'a') {
                     show_hidden = 1;
@@ -133,15 +133,19 @@ int handle_reveal_command(int argc, char *argv[]) {
         }
     }
     
+    // Save current directory as previous before changing
+    char current_dir[PATH_MAX];
+    if (getcwd(current_dir, PATH_MAX) == NULL) {
+        perror("getcwd failed");
+        return 1;
+    }
+    
     // Determine the target directory
     char target_dir[PATH_MAX];
     
     if (target_arg_index == -1) {
         // No target specified, use current directory
-        if (getcwd(target_dir, PATH_MAX) == NULL) {
-            perror("getcwd failed");
-            return 1;
-        }
+        strcpy(target_dir, current_dir);
     } else {
         // Use the specified target
         if (resolve_target_directory(argv[target_arg_index], target_dir) != 0) {
@@ -162,7 +166,7 @@ int handle_reveal_command(int argc, char *argv[]) {
     int file_count = 0;
     
     while ((entry = readdir(dir)) != NULL) {
-        // Skip . and .. entries
+        // Skip . and .. entries regardless of -a flag (we'll handle them separately)
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
@@ -177,6 +181,10 @@ int handle_reveal_command(int argc, char *argv[]) {
         if (file_names[file_count] == NULL) {
             perror("strdup failed");
             closedir(dir);
+            // Free already allocated memory
+            for (int i = 0; i < file_count; i++) {
+                free(file_names[i]);
+            }
             return 1;
         }
         
@@ -189,25 +197,34 @@ int handle_reveal_command(int argc, char *argv[]) {
     qsort(file_names, file_count, sizeof(char *), compare_strings);
     
     // Display the files
-    if (file_count == 0) {
-        // Empty directory, nothing to display
-        return 0;
-    }
-    
     if (line_by_line) {
         // Display one entry per line
+        // Show . and .. first if showing hidden files
+        if (show_hidden) {
+            printf(".\n..\n");
+        }
+        
         for (int i = 0; i < file_count; i++) {
             printf("%s\n", file_names[i]);
             free(file_names[i]);
         }
     } else {
         // Display in ls format (space-separated)
+        // Show . and .. first if showing hidden files
+        if (show_hidden) {
+            printf(". .. ");
+        }
+        
         for (int i = 0; i < file_count; i++) {
             printf("%s%s", file_names[i], (i < file_count - 1) ? " " : "");
             free(file_names[i]);
         }
         printf("\n");
     }
+    
+    // Update previous working directory after successful execution
+    strcpy(previous_cwd, current_dir);
+    has_previous_cwd = 1;
     
     return 0;
 }

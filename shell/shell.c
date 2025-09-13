@@ -60,23 +60,23 @@ int initialize_shell() {
  * Parse input string into command arguments
  * Returns the number of arguments
  */
-static int parse_args(char *input, char *args[], int max_args) {
-    int argc = 0;
-    char *token = strtok(input, " \t\n");
+// static int parse_args(char *input, char *args[], int max_args) {
+//     int argc = 0;
+//     char *token = strtok(input, " \t\n");
     
-    while (token != NULL && argc < max_args) {
-        args[argc++] = token;
-        token = strtok(NULL, " \t\n");
-    }
+//     while (token != NULL && argc < max_args) {
+//         args[argc++] = token;
+//         token = strtok(NULL, " \t\n");
+//     }
     
-    args[argc] = NULL;  // Null-terminate the array
-    return argc;
-}
+//     args[argc] = NULL;  // Null-terminate the array
+//     return argc;
+// }
 
 void run_shell() {
     char input[INPUT_BUFFER_SIZE];
     char input_copy[INPUT_BUFFER_SIZE];  // To preserve original input for parsing
-    char *args[64];  // Maximum number of arguments
+    //char *args[64];  // Maximum number of arguments
     
     while (1) {
         // Check for completed background jobs before displaying prompt
@@ -121,33 +121,33 @@ void run_shell() {
         }
         
         // Parse input into arguments to check for built-in commands
-        int argc = parse_args(input_copy, args, 63);
+        //int argc = parse_args(input_copy, args, 63);
         
         // Check if it's a built-in command
-        if (argc > 0) {
-            if (strcmp(args[0], "hop") == 0) {
-                handle_hop_command(argc, args);
-                continue;
-            } else if (strcmp(args[0], "reveal") == 0) {
-                handle_reveal_command(argc, args);
-                continue;
-            } else if (strcmp(args[0], "log") == 0) {
-                handle_log_command(argc, args);
-                continue;
-            } else if (strcmp(args[0], "activities") == 0) {
-                handle_activities_command(argc, args);
-                continue;
-            } else if (strcmp(args[0], "ping") == 0) {
-                handle_ping_command(argc, args);
-                continue;
-            } else if (strcmp(args[0], "fg") == 0) {
-                handle_fg_command(argc, args);
-                continue;
-            } else if (strcmp(args[0], "bg") == 0) {
-                handle_bg_command(argc, args);
-                continue;
-            }
-        }
+        // if (argc > 0) {
+        //     if (strcmp(args[0], "hop") == 0) {
+        //         handle_hop_command(argc, args);
+        //         continue;
+        //     } else if (strcmp(args[0], "reveal") == 0) {
+        //         handle_reveal_command(argc, args);
+        //         continue;
+        //     } else if (strcmp(args[0], "log") == 0) {
+        //         handle_log_command(argc, args);
+        //         continue;
+        //     } else if (strcmp(args[0], "activities") == 0) {
+        //         handle_activities_command(argc, args);
+        //         continue;
+        //     } else if (strcmp(args[0], "ping") == 0) {
+        //         handle_ping_command(argc, args);
+        //         continue;
+        //     } else if (strcmp(args[0], "fg") == 0) {
+        //         handle_fg_command(argc, args);
+        //         continue;
+        //     } else if (strcmp(args[0], "bg") == 0) {
+        //         handle_bg_command(argc, args);
+        //         continue;
+        //     }
+        // }
         
         // Execute the command
         execute_command_line(input);

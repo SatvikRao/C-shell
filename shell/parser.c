@@ -38,16 +38,15 @@ static int parse_name();
 
 // Helper function to check if character is part of a name token
 static int is_name_char(char c) {
-    return c != '\0' && c != '|' && c != '&' && c != '<' && c != '>' && c != ';';
+    // In the grammar, name -> r"[^|&><;\s]+"
+    // This means a name can be any character except |, &, >, <, ;, and whitespace
+    return c != '\0' && c != '|' && c != '&' && c != '<' && c != '>' && c != ';' && 
+           !isspace(c); // Exclude whitespace characters
 }
 
 // Skip whitespace characters
 static void skip_whitespace() {
-    while (current_input[current_position] != '\0' && 
-           (current_input[current_position] == ' ' || 
-            current_input[current_position] == '\t' || 
-            current_input[current_position] == '\n' || 
-            current_input[current_position] == '\r')) {
+    while (current_input[current_position] != '\0' && isspace(current_input[current_position])) {
         current_position++;
     }
 }
@@ -110,7 +109,15 @@ static void get_next_token() {
             // Handle name token
             if (is_name_char(c)) {
                 int start = current_position;
-                while (is_name_char(current_input[current_position])) {
+                
+                // Collect characters until we hit a special character or whitespace
+                while (current_input[current_position] != '\0' && 
+                       current_input[current_position] != '|' && 
+                       current_input[current_position] != '&' && 
+                       current_input[current_position] != '<' && 
+                       current_input[current_position] != '>' && 
+                       current_input[current_position] != ';' && 
+                       !isspace(current_input[current_position])) {
                     current_position++;
                 }
                 
@@ -233,11 +240,12 @@ static int parse_input() {
     
     get_next_token();
     
-    // Special case: <name without space
-    if (current_token.type == TOKEN_NAME) {
-        get_next_token();
+    // We must have a name after <
+    if (current_token.type != TOKEN_NAME) {
+        return 0;
     }
     
+    get_next_token();
     return 1;
 }
 
@@ -249,11 +257,12 @@ static int parse_output() {
     
     get_next_token();
     
-    // Special case: >name or >>name without space
-    if (current_token.type == TOKEN_NAME) {
-        get_next_token();
+    // We must have a name after > or >>
+    if (current_token.type != TOKEN_NAME) {
+        return 0;
     }
     
+    get_next_token();
     return 1;
 }
 
@@ -274,3 +283,4 @@ int parse_command(const char* input) {
     cleanup_parser();
     return result;
 }
+
