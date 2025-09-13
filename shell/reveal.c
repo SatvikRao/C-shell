@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+//LLM generated
 // External function from shell.c to get the home directory
 extern char* get_home_directory();
 

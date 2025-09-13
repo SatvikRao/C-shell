@@ -26,7 +26,7 @@
 #define _XOPEN_SOURCE 700
 #define _GNU_SOURCE
 
-
+//LLM generated
 // Structure to hold a command with its redirections
 typedef struct {
     char *args[MAX_ARGS];  // Command and arguments

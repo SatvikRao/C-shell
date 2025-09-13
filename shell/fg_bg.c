@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 
+//LLM generated
 // External declarations for the background job array
 extern struct {
     pid_t pid;

@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <limits.h>  // For PATH_MAX
 
+//LLM generated
 // Define PATH_MAX if it's not already defined
 #ifndef PATH_MAX
 #define PATH_MAX 4096

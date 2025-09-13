@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <errno.h>
 
+//LLM generated
 // External functions and variables from execute.c
 extern void check_background_jobs();
 extern struct {

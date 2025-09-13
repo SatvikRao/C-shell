@@ -4,6 +4,7 @@
 #include <string.h>
 #include <ctype.h>
 
+//LLM generated
 // Token types
 typedef enum {
     TOKEN_NAME,     // Any sequence not containing |&><;
